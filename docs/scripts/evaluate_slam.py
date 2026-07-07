@@ -26,7 +26,6 @@ def _aligned(gt, est, align_mode):
 
 
 def ate_mean_std(gt, est, align_mode):
-    """Per-point ATE (Eq. 1): mean and std of ||t_hat_i - t_i||."""
     est_a = _aligned(gt, est, align_mode)
     ape = metrics.APE(metrics.PoseRelation.translation_part)
     ape.process_data((gt, est_a))
@@ -36,7 +35,6 @@ def ate_mean_std(gt, est, align_mode):
 
 
 def rpe_mean_std(gt, est, align_mode, delta=1):
-    """Per-segment RPE (Eq. 2) with index offset Δ (default 1 = consecutive)."""
     est_a = _aligned(gt, est, align_mode)
     rpe = metrics.RPE(
         metrics.PoseRelation.translation_part,
@@ -51,12 +49,6 @@ def rpe_mean_std(gt, est, align_mode, delta=1):
 
 
 def sd_mean_std(gt, est, delta=1, form="ratio", eps=1e-6):
-    """Scale drift (Eq. 3) as the cumulative-distance ratio per segment.
-
-    form='ratio' -> SD_i = ||est_seg|| / ||gt_seg||           (optimum 1.0, paper table)
-    form='abs'   -> SD_i = |(||est_seg|| / ||gt_seg||) - 1|    (optimum 0.0, printed Eq.3)
-    No scale alignment is applied (that would force the ratio to ~1).
-    """
     e = est.positions_xyz
     g = gt.positions_xyz
     n = min(len(e), len(g))
@@ -96,7 +88,7 @@ def main():
     ap.add_argument("--sd-form", choices=["ratio", "abs"], default="ratio",
                     help="SD convention: 'ratio' (optimum 1, paper table) or 'abs' (optimum 0)")
     ap.add_argument("--max-diff", type=float, default=0.02, help="Max timestamp diff for association [s]")
-    # Optional leaderboard update
+
     ap.add_argument("--algorithm", help="Algorithm name (for --update)")
     ap.add_argument("--scene", help="Scene id, e.g. mu-hall-01 (for --update)")
     ap.add_argument("--update", help="Path to slam_results.yaml to update in place")
