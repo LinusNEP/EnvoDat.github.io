@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+"""This script generates the EnvoDat benchmark leaderboard markdown from YAML results.
+"""
+import argparse
+import datetime as dt
+import os
+import yaml
+
+SLAM_METRICS = [
+    ("ate_rmse", "ATE (μ / σ) [m]", None),
+    ("rpe_rmse", "RPE (μ / σ) [m]", None),
+    ("sd", "Scale Drift (μ / σ)", 1.0),
+]
+
+DET_METRICS = [
+    ("map50", "mAP@50 (%)", True),
+    ("map5095", "mAP@50:95 (%)", True),
+    ("precision", "Precision (%)", True),
+    ("recall", "Recall (%)", True),
+    ("f1", "F1", True),
+    ("inference_ms", "Infer (ms)", False),
+    ("fps", "FPS", True),
+    ("memory_gb", "Mem (GB)", False),
+]
+
+DNF = ("dnf", "x", "fail", "failed")
+
+def _is_dnf(v):
+    return isinstance(v, str) and v.strip().lower() in DNF
+
+def _mean(v):
+    if v is None or _is_dnf(v):
+        return None
+    if isinstance(v, (list, tuple)):
+        return float(v[0])
+    if isinstance(v, (int, float)):
+        return float(v)
+    return None
+
+def _fmt_pair(v):
+    if v is None:
+        return "—"
+    if _is_dnf(v):
+        return "DNF"
+    if isinstance(v, (list, tuple)):
+        if len(v) >= 2 and v[1] is not None:
+            return f"{float(v[0]):.2f} / {float(v[1]):.2f}"
+        return f"{float(v[0]):.2f}"
+    if isinstance(v, float):
+        return f"{v:.2f}"
+    return str(v)
+
+def _fmt_scalar(v):
+    if v is None:
+        return "—"
+    if isinstance(v, float):
+        return f"{v:.2f}"
+    return str(v)
+
+def _best_mean(means, target):
+    nums = [m for m in means if m is not None]
+    if not nums:
+        return None
+    if target is None:
+        return min(nums)
+    return min(nums, key=lambda m: abs(m - target))
+
+def _best_scalar(values, higher):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    if not nums:
+        return None
+    return max(nums) if higher else min(nums)
+
+def render_slam(data):
+    scenes = data["scenes"]
+    entries = data["entries"]
+
+    out = ["## SLAM track\n"]
+    out.append(
+        "Five SOTA SLAM systems on five representative EnvoDat scenes. ATE/RPE: "
+        "lower is better. Scale Drift (SD): **optimum is 1.0** (values < 1 "
+        "underestimate, > 1 overestimate scale). **Bold** = best per scene; "
+        "DNF = tracking lost / did not complete; — = not reported.\n"
+    )
+    out.append("| Scene | Dominant challenge |")
+    out.append("| ----- | ------------------ |")
+    for s in scenes:
+        out.append(f"| {s['label']} | {s['characteristic']} |")
+    out.append("")
+
+    for key, title, target in SLAM_METRICS:
+        out.append(f"### {title}\n")
+        out.append("| Method | Category | " + " | ".join(s["label"] for s in scenes) + " |")
+        out.append("| --- | --- | " + " | ".join("---" for _ in scenes) + " |")
+
+        col_best = {}
+        for s in scenes:
+            means = [_mean(e["results"].get(s["id"], {}).get(key)) for e in entries]
+            col_best[s["id"]] = _best_mean(means, target)
+
+        for e in entries:
+            cells = []
+            for s in scenes:
+                v = e["results"].get(s["id"], {}).get(key)
+                txt = _fmt_pair(v)
+                m = _mean(v)
+                if m is not None and col_best[s["id"]] is not None and abs(m - col_best[s["id"]]) < 1e-9:
+                    txt = f"**{txt}**"
+                cells.append(txt)
+            out.append(f"| {e['algorithm']} | {e.get('category','')} | " + " | ".join(cells) + " |")
+        out.append("")
+    return "\n".join(out)
+
+
+def render_detection(data):
+    entries = data["entries"]
+    tr = data.get("training", {})
+
+    rank_key = "map5095"
+    entries = sorted(
+        entries,
+        key=lambda e: (e["results"].get(rank_key) if isinstance(e["results"].get(rank_key), (int, float)) else -1),
+        reverse=True,
+    )
+
+    out = ["## Detection track\n"]
+    if tr:
+        out.append(
+            f"Models trained across all scenes (lr={tr.get('lr')}, batch={tr.get('batch')}, "
+            f"epochs={tr.get('epochs')}, split {tr.get('split')}). Ranked by mAP@50:95; "
+            "**bold** = best per metric.\n"
+        )
+
+    out.append("| Rank | Model | " + " | ".join(h for _, h, _ in DET_METRICS) + " |")
+    out.append("| --- | --- | " + " | ".join("---" for _ in DET_METRICS) + " |")
+
+    col_best = {}
+    for key, _, higher in DET_METRICS:
+        col_best[key] = _best_scalar([e["results"].get(key) for e in entries], higher)
+
+    for i, e in enumerate(entries, 1):
+        cells = []
+        for key, _, _ in DET_METRICS:
+            v = e["results"].get(key)
+            txt = _fmt_scalar(v)
+            if isinstance(v, (int, float)) and col_best[key] is not None and abs(v - col_best[key]) < 1e-9:
+                txt = f"**{txt}**"
+            cells.append(txt)
+        out.append(f"| {i} | {e['model']} | " + " | ".join(cells) + " |")
+    out.append("")
+    return "\n".join(out)
+
+
+HEADER = """<!-- AUTO-GENERATED by docs/scripts/generate_leaderboard.py. Do not edit by hand. -->
+<!-- Edit results/slam_results.yaml and results/detection_results.yaml instead. -->
+
+# EnvoDat Benchmark Leaderboard
+
+Public leaderboard for the EnvoDat dataset. Baseline numbers are from the
+[ICRA 2025 paper](https://ieeexplore.ieee.org/document/11127594). Last generated: {date}.
+
+"""
+
+FOOTER = """## How to submit
+
+1. Reproduce your result using the EnvoDat sequences and the tooling in
+   [`docs/scripts/`](scripts/) (`evaluate_slam.py` for the SLAM track,
+   `yolov8_training.py` + `model.val()` for the detection track).
+2. Add an entry to the relevant file under [`results/`](../results/).
+3. Run `python docs/scripts/generate_leaderboard.py` to regenerate this page.
+4. Open a pull request with the YAML diff, the regenerated `BENCHMARK.md`, your
+   exact command/config, and a link to logs or a short report.
+
+See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the full checklist.
+
+"""
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Regenerate the EnvoDat leaderboard markdown.")
+    ap.add_argument("--slam", default="results/slam_results.yaml")
+    ap.add_argument("--detection", default="results/detection_results.yaml")
+    ap.add_argument("--out", default="docs/BENCHMARK.md")
+    args = ap.parse_args()
+
+    parts = [HEADER.format(date=dt.date.today().isoformat())]
+    if os.path.exists(args.slam):
+        with open(args.slam) as f:
+            parts.append(render_slam(yaml.safe_load(f)))
+    if os.path.exists(args.detection):
+        with open(args.detection) as f:
+            parts.append(render_detection(yaml.safe_load(f)))
+    parts.append(FOOTER)
+
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+    with open(args.out, "w") as f:
+        f.write("\n".join(parts).rstrip() + "\n")
+    print(f"Wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
